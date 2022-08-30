@@ -382,11 +382,16 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 		sb.WriteString(incomingVersion.String())
 
 		releaseRef := sb.String()
+		
+		mostRecentCommit := trimmedLastReleasedCommit
+		if len(commits) > 0 {
+			mostRecentCommit = commits[0]
+		}
 
 		result[scope] = Version{
 			VersionString: releaseRef,
 			Version:       *incomingVersion,
-			ReleaseCommit: trimmedLastReleasedCommit,
+			ReleaseCommit: mostRecentCommit,
 			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
 		}
 	}
