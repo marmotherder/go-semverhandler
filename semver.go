@@ -131,8 +131,8 @@ func (s SemverHandler) parseConventionalCommit(commitMesage string) (
 	return msg, nil, errors.New("failed to cast conventional commit message to conventional commit type")
 }
 
-func (s SemverHandler) determineIncrementFromCommits(commits []string) int {
-	increment := 0
+func (s SemverHandler) determineIncrementFromCommits(commits []string) map[string]int {
+	scopedIncrements := map[string]int{}
 	for _, commit := range commits {
 		message, err := s.Git.GetCommitMessageBody(commit)
 		if err != nil {
@@ -153,39 +153,43 @@ func (s SemverHandler) determineIncrementFromCommits(commits []string) int {
 			continue
 		}
 
+		scope := ""
+		if cc.Scope != nil {
+			scope = *cc.Scope
+		}
+
+		if _, ok := scopedIncrements[scope]; !ok {
+			scopedIncrements[scope] = 0
+		}
+
 		if msg.IsBreakingChange() {
-			increment = majorIncrement
+			scopedIncrements[scope] = majorIncrement
 			break
 		}
 
 		switch cc.Type {
 		case "feat", "refactor":
-			if increment < minorIncrement {
-				increment = minorIncrement
+			if scopedIncrements[scope] < minorIncrement {
+				scopedIncrements[scope] = minorIncrement
 			}
 		case "fix", "chore", "perf", "docs", "style":
-			if increment < patchIncrement {
-				increment = patchIncrement
+			if scopedIncrements[scope] < patchIncrement {
+				scopedIncrements[scope] = patchIncrement
 			}
 		case "build", "ci", "test":
-			if increment < buildIncrement {
-				increment = buildIncrement
+			if scopedIncrements[scope] < buildIncrement {
+				scopedIncrements[scope] = buildIncrement
 			}
 		default:
 			s.Logger.Infof("conventional commit type '%s' not implemented", cc.Type)
 		}
 	}
 
-	return increment
+	return scopedIncrements
 }
 
-func (s SemverHandler) updateVersion(version string, commits []string, isPrerelease bool, prereleasePrefix, buildID *string) (*semver.Version, error) {
-	incomingVersion, err := semver.Parse(version)
-	if err != nil {
-		return nil, err
-	}
-
-	switch s.determineIncrementFromCommits(commits) {
+func (s SemverHandler) updateVersion(scope string, increment int, incomingVersion semver.Version, isPrerelease bool, prereleasePrefix, buildID *string) (*semver.Version, error) {
+	switch increment {
 	case majorIncrement:
 		incomingVersion.Major++
 		incomingVersion.Minor = 0
@@ -255,6 +259,35 @@ func (s SemverHandler) updateVersion(version string, commits []string, isPrerele
 	return &incomingVersion, nil
 }
 
+func (s SemverHandler) getBranchAndRemote(lookupBranch *string) (string, string, error) {
+	branch := ""
+	if lookupBranch != nil {
+		branch = *lookupBranch
+	} else {
+		currentBranch, err := s.Git.GetCurrentBranch()
+		if err != nil {
+			s.Logger.Warn("failed to get the current git branch")
+			return "", "", err
+		}
+		if currentBranch == nil {
+			s.Logger.Warn("failed to get the current git branch")
+			return "", "", errors.New("was not able to get the current branch on git")
+		}
+
+		branch = *currentBranch
+	}
+
+	remote, err := s.Git.GetRemote()
+	if err != nil {
+		return branch, "", err
+	}
+	if remote == nil {
+		return branch, "", errors.New("returned git remote was empty")
+	}
+
+	return branch, *remote, nil
+}
+
 type GetReleasedVersionsOptions struct {
 	SkipFetch bool
 	UseTags   bool
@@ -293,7 +326,7 @@ func (s SemverHandler) GetReleasedVersions(opts GetReleasedVersionsOptions) (map
 	return scopedRefs, nil
 }
 
-type EvaluateScopedVersionsOptions struct {
+type VersionOptions struct {
 	UseTags          bool
 	Branch           *string
 	BuildID          *string
@@ -301,6 +334,78 @@ type EvaluateScopedVersionsOptions struct {
 	PrereleasePrefix *string
 	ReleasePrefix    *string
 	VersionPrefix    *string
+}
+
+type GetInitialVersionsOptions struct {
+	VersionOptions
+}
+
+func (s SemverHandler) GetInitialVersions(opts GetInitialVersionsOptions) (map[string]Version, error) {
+	refType := "heads"
+	if opts.UseTags {
+		refType = "tags"
+	}
+
+	branch, remote, err := s.getBranchAndRemote(opts.Branch)
+	if err != nil {
+		return nil, err
+	}
+
+	latestCommit, err := s.Git.GetLastCommitOnRef(fmt.Sprintf("%s heads/%s", remote, branch))
+	if err != nil {
+		s.Logger.Error("failed to get latest commit for branch %s on %s", branch, remote)
+		return nil, err
+	}
+	if latestCommit == nil {
+		return nil, fmt.Errorf("latest commit for branch %s on %s returned blank", branch, remote)
+	}
+
+	commits, err := s.Git.ListCommits(*latestCommit)
+	if err != nil {
+		s.Logger.Error("failed to get list commits for branch %s on %s", branch, remote)
+		return nil, err
+	}
+	if len(commits) == 0 {
+		return nil, fmt.Errorf("no commits were found on branch %s on %s", branch, remote)
+	}
+
+	result := map[string]Version{}
+	for scope, increment := range s.determineIncrementFromCommits(commits) {
+		incomingVersion, err := s.updateVersion(scope, increment, semver.MustParse("0.0.0"), opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
+		if err != nil {
+			s.Logger.Errorf("failed to update the version for scope %s", scope)
+			s.Logger.Error(err)
+			continue
+		}
+		if incomingVersion == nil {
+			s.Logger.Errorf("failed to get updated the version for scope %s", scope)
+			continue
+		}
+
+		sb := strings.Builder{}
+		if opts.ReleasePrefix != nil {
+			sb.WriteString(fmt.Sprintf("%s/", *opts.ReleasePrefix))
+		}
+		sb.WriteString(scope)
+		if opts.VersionPrefix != nil {
+			sb.WriteString(*opts.VersionPrefix)
+		}
+
+		releaseRef := sb.String()
+
+		result[scope] = Version{
+			VersionString: releaseRef + incomingVersion.String(),
+			Version:       *incomingVersion,
+			ReleaseCommit: *latestCommit,
+			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
+		}
+	}
+
+	return result, nil
+}
+
+type EvaluateScopedVersionsOptions struct {
+	VersionOptions
 }
 
 func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Version, opts EvaluateScopedVersionsOptions) (map[string]Version, error) {
@@ -329,38 +434,23 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 
 		trimmedLastReleasedCommit := strings.TrimSpace(*lastReleasedCommit)
 
-		branch := ""
-		if opts.Branch != nil {
-			branch = *opts.Branch
-		} else {
-			currentBranch, err := s.Git.GetCurrentBranch()
-			if err != nil {
-				s.Logger.Warn("failed to get the current git branch")
-				return nil, err
-			}
-			if currentBranch == nil {
-				s.Logger.Warn("failed to get the current git branch")
-				return nil, errors.New("was not able to get the current branch on git")
-			}
-
-			branch = *currentBranch
-		}
-
-		remote, err := s.Git.GetRemote()
+		branch, remote, err := s.getBranchAndRemote(opts.Branch)
 		if err != nil {
 			return nil, err
 		}
-		if remote == nil {
-			return nil, errors.New("returned git remote was empty")
-		}
 
-		commits, err := s.Git.ListCommits(trimmedLastReleasedCommit + ".." + *remote + "/" + branch)
+		commits, err := s.Git.ListCommits(trimmedLastReleasedCommit + ".." + remote + "/" + branch)
 		if err != nil {
 			s.Logger.Errorf("failed to list commits after %s for scope %s", trimmedLastReleasedCommit, commits)
 			continue
 		}
 
-		incomingVersion, err := s.updateVersion(refs[0].Version.String(), commits, opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
+		increments := s.determineIncrementFromCommits(commits)
+		if _, ok := increments[scope]; !ok {
+			return nil, fmt.Errorf("failed to find an increment for the given scope %s", scope)
+		}
+
+		incomingVersion, err := s.updateVersion(scope, increments[scope], refs[0].Version, opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
 		if err != nil {
 			s.Logger.Errorf("failed to update the version for scope %s", scope)
 			s.Logger.Error(err)
@@ -381,14 +471,14 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 		}
 
 		releaseRef := sb.String()
-		
+
 		mostRecentCommit := trimmedLastReleasedCommit
 		if len(commits) > 0 {
 			mostRecentCommit = commits[0]
 		}
 
 		result[scope] = Version{
-			VersionString: releaseRef+incomingVersion.String(),
+			VersionString: releaseRef + incomingVersion.String(),
 			Version:       *incomingVersion,
 			ReleaseCommit: mostRecentCommit,
 			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
