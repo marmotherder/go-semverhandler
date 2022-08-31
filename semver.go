@@ -336,11 +336,7 @@ type VersionOptions struct {
 	VersionPrefix    *string
 }
 
-type GetInitialVersionsOptions struct {
-	VersionOptions
-}
-
-func (s SemverHandler) GetInitialVersions(opts GetInitialVersionsOptions) (map[string]Version, error) {
+func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Version, error) {
 	refType := "heads"
 	if opts.UseTags {
 		refType = "tags"
@@ -404,11 +400,7 @@ func (s SemverHandler) GetInitialVersions(opts GetInitialVersionsOptions) (map[s
 	return result, nil
 }
 
-type EvaluateScopedVersionsOptions struct {
-	VersionOptions
-}
-
-func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Version, opts EvaluateScopedVersionsOptions) (map[string]Version, error) {
+func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Version, opts VersionOptions) (map[string]Version, error) {
 	result := map[string]Version{}
 	for scope, refs := range scopedReleases {
 		prefix := ""
