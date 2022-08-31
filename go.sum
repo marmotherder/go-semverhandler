@@ -10,8 +10,8 @@ github.com/leodido/go-conventionalcommits v0.9.0 h1:JkwnvhWGBdQzcOsj+gWOvuF82VHO
 github.com/leodido/go-conventionalcommits v0.9.0/go.mod h1:1F9iXOWi2DxDtbIO4fhltd1FwUkIN9YMV0c/GHs4xoM=
 github.com/marmotherder/go-cmdwrapper v0.0.0-20220830142524-3bb9a93d9f75 h1:UVUA6USmJt+vBuLg7f1awWCB7FjnW9J0XFrcBJGPYtw=
 github.com/marmotherder/go-cmdwrapper v0.0.0-20220830142524-3bb9a93d9f75/go.mod h1:U/s/vgekj9Uvq7xpPhZDYZypeSi6AbpJWQvP8LGW4d4=
-github.com/marmotherder/go-gitcliwrapper v0.0.0-20220831090028-81cd9c6b8add h1:PRG0h00dkQOruJxfsSQ2kQJqU5hDVghh721uc+Gme2Y=
-github.com/marmotherder/go-gitcliwrapper v0.0.0-20220831090028-81cd9c6b8add/go.mod h1:gkuH9s3eWCTbxDg/4BxupOFLnoJo+CBuSOLZf8X7ELU=
+github.com/marmotherder/go-gitcliwrapper v0.0.0-20220831091606-cb561b6f578f h1:pM1rOxP2F9Skec/vYNivFkzdN2gorbg15y4qB9zai84=
+github.com/marmotherder/go-gitcliwrapper v0.0.0-20220831091606-cb561b6f578f/go.mod h1:tcEkHV+QRvV9mA2wR9V58bOCMbEgQ4O3slD+26Zod2k=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/sirupsen/logrus v1.7.0/go.mod h1:yWOB1SBYBC5VeMP7gHvWumXLIWorT60ONWic61uBYv0=
