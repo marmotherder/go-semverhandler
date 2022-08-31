@@ -347,7 +347,7 @@ func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Versi
 		return nil, err
 	}
 
-	latestCommit, err := s.Git.GetLastCommitOnRef(fmt.Sprintf("%s refs/heads/%s", remote, branch))
+	latestCommit, err := s.Git.GetLastCommitOnRef(fmt.Sprintf("%s %s", remote, branch))
 	if err != nil {
 		s.Logger.Errorf("failed to get latest commit for branch %s on %s", branch, remote)
 		return nil, err
