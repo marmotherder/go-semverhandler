@@ -379,7 +379,6 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 		if opts.VersionPrefix != nil {
 			sb.WriteString(*opts.VersionPrefix)
 		}
-		sb.WriteString(incomingVersion.String())
 
 		releaseRef := sb.String()
 		
@@ -389,7 +388,7 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 		}
 
 		result[scope] = Version{
-			VersionString: releaseRef,
+			VersionString: releaseRef+incomingVersion.String(),
 			Version:       *incomingVersion,
 			ReleaseCommit: mostRecentCommit,
 			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
@@ -397,20 +396,4 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 	}
 
 	return result, nil
-}
-
-type ReleaseScopedVersionsOptions struct {
-	UseTags       bool
-	ReleasePrefix *string
-	VersionPrefix *string
-}
-
-func (s SemverHandler) ReleaseScopedVersions(scopedVersions map[string]Version) error {
-	for scope, version := range scopedVersions {
-		s.Logger.Infof("releasing version %s for scope %s", version.VersionString, scope)
-		if err := s.Git.ForcePushSourceToTargetRef(version.ReleaseCommit, version.ReleaseString); err != nil {
-			return err
-		}
-	}
-	return nil
 }
