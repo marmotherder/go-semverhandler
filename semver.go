@@ -131,8 +131,9 @@ func (s SemverHandler) parseConventionalCommit(commitMesage string) (
 	return msg, nil, errors.New("failed to cast conventional commit message to conventional commit type")
 }
 
-func (s SemverHandler) determineIncrementFromCommits(commits []string) map[string]int {
+func (s SemverHandler) determineIncrementFromCommits(commits []string) (map[string]int, map[string][]string) {
 	scopedIncrements := map[string]int{}
+	scopedCommits := map[string][]string{}
 	for _, commit := range commits {
 		message, err := s.Git.GetCommitMessageBody(commit)
 		if err != nil {
@@ -162,6 +163,12 @@ func (s SemverHandler) determineIncrementFromCommits(commits []string) map[strin
 			scopedIncrements[scope] = 0
 		}
 
+		if _, ok := scopedIncrements[scope]; !ok {
+			scopedCommits[scope] = []string{}
+		}
+
+		scopedCommits[scope] = append(scopedCommits[scope], commit)
+
 		if msg.IsBreakingChange() {
 			scopedIncrements[scope] = majorIncrement
 			break
@@ -185,7 +192,7 @@ func (s SemverHandler) determineIncrementFromCommits(commits []string) map[strin
 		}
 	}
 
-	return scopedIncrements
+	return scopedIncrements, scopedCommits
 }
 
 func (s SemverHandler) updateVersion(scope string, increment int, incomingVersion semver.Version, isPrerelease bool, prereleasePrefix, buildID *string) (*semver.Version, error) {
@@ -366,7 +373,8 @@ func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Versi
 	}
 
 	result := map[string]Version{}
-	for scope, increment := range s.determineIncrementFromCommits(commits) {
+	increments, scopedCommits := s.determineIncrementFromCommits(commits)
+	for scope, increment := range increments {
 		incomingVersion, err := s.updateVersion(scope, increment, semver.MustParse("0.0.0"), opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
 		if err != nil {
 			s.Logger.Errorf("failed to update the version for scope %s", scope)
@@ -383,6 +391,10 @@ func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Versi
 			sb.WriteString(fmt.Sprintf("%s/", *opts.ReleasePrefix))
 		}
 		sb.WriteString(scope)
+		if scope != "" {
+			sb.WriteString("/")
+		}
+
 		if opts.VersionPrefix != nil {
 			sb.WriteString(*opts.VersionPrefix)
 		}
@@ -392,7 +404,7 @@ func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Versi
 		result[scope] = Version{
 			VersionString: releaseRef + incomingVersion.String(),
 			Version:       *incomingVersion,
-			ReleaseCommit: *latestCommit,
+			ReleaseCommit: scopedCommits[scope][0],
 			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
 		}
 	}
@@ -437,7 +449,7 @@ func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Versio
 			continue
 		}
 
-		increments := s.determineIncrementFromCommits(commits)
+		increments, _ := s.determineIncrementFromCommits(commits)
 		if _, ok := increments[scope]; !ok {
 			return nil, fmt.Errorf("failed to find an increment for the given scope %s", scope)
 		}
