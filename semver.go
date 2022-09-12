@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/blang/semver"
 	"github.com/leodido/go-conventionalcommits"
@@ -17,8 +18,6 @@ import (
 type Version struct {
 	VersionString string
 	Version       semver.Version
-	ReleaseCommit string
-	ReleaseString string
 }
 
 const (
@@ -43,28 +42,182 @@ type SemverHandler struct {
 	Logger        logger
 	Git           *gitcliwrapper.GitCLIWrapper
 	ReleasePrefix *string
+	VersionPrefix *string
 }
 
 func (s SemverHandler) getBranchPrefix() string {
 	if s.ReleasePrefix != nil {
-		return *s.ReleasePrefix
+		return *s.ReleasePrefix + "/"
 	}
 	return ""
 }
 
-func (s SemverHandler) getLastCommitOnRef(ref string, useTags bool) (*string, error) {
-	fullRef := s.getBranchPrefix() + "/" + ref
-	if !useTags {
-		remote, err := s.Git.GetRemote()
+func (s SemverHandler) getOldest(scopedRefs map[string][]Version, branch, remote, latestCommit string, useTags bool) (oldestDT *time.Time, oldestVersion *string, oldestScope *string, err error) {
+	if len(scopedRefs) <= 0 {
+		var commits []string
+		commits, err = s.Git.ListCommits(latestCommit)
 		if err != nil {
-			return nil, err
+			s.Logger.Errorf("failed to get list commits for branch %s on %s", branch, remote)
+			return
 		}
-		if remote == nil {
-			return nil, errors.New("returned git remote was empty")
+		if len(commits) == 0 {
+			err = fmt.Errorf("no commits were found on branch %s on %s", branch, remote)
+			return
 		}
-		fullRef = *remote + "/" + fullRef
+
+		oldestCommit := commits[len(commits)-1]
+		oldestDT, err = s.Git.GetReferenceDateTime(commits[len(commits)-1])
+		oldestVersion = &oldestCommit
+
+		return
 	}
-	return s.Git.GetLastCommitOnRef(fullRef)
+
+	for scope, versions := range scopedRefs {
+		if len(versions) == 0 {
+			continue
+		}
+		version := versions[0]
+		sb := strings.Builder{}
+		sb.WriteString(s.getBranchPrefix())
+		if scope != "" {
+			sb.WriteString(scope)
+			sb.WriteString("/")
+		}
+		if s.VersionPrefix != nil {
+			sb.WriteString(*s.VersionPrefix)
+		}
+
+		sb.WriteString(version.VersionString)
+		lookupVersion := sb.String()
+
+		if !useTags {
+			lookupVersion = remote + "/" + lookupVersion
+		}
+
+		var lastCommit *string
+		lastCommit, err = s.Git.GetLastCommitOnRef(lookupVersion)
+		if err != nil {
+			s.Logger.Warnf("was unable to resolve the latest commit for %s", lookupVersion)
+		}
+		if lastCommit == nil {
+			err = fmt.Errorf("was unable to find a latest commit for %s", lookupVersion)
+			return
+		}
+
+		var dt *time.Time
+		dt, err = s.Git.GetReferenceDateTime(lookupVersion)
+		if err != nil {
+			s.Logger.Warnf("was unable to resolve the last change on %s to a date time", lookupVersion)
+			return
+		}
+		if dt == nil {
+			err = fmt.Errorf("was unable to load the date time for the reference %s", lookupVersion)
+			return
+		}
+
+		if oldestDT == nil || dt.Before(*oldestDT) {
+			oldestDT = dt
+			oldestVersion = &lookupVersion
+			currentScope := scope
+			oldestScope = &currentScope
+		}
+	}
+
+	return
+}
+
+type ScopeData struct {
+	Increment int
+	Commits   []string
+}
+
+func (s SemverHandler) determineIncrementFromCommits(commits []string) map[string]ScopeData {
+	results := map[string]ScopeData{}
+	for _, commit := range commits {
+		message, err := s.Git.GetCommitMessageBody(commit)
+		if err != nil {
+			s.Logger.Error(err)
+			continue
+		}
+		if message == nil {
+			s.Logger.Errorf("did not find a commit message body for %s", commit)
+			continue
+		}
+
+		s.Logger.Debugf("try to determine increment from %s", commit)
+		s.Logger.Debug(*message)
+
+		msg, cc, err := s.parseConventionalCommit(*message)
+		if err != nil {
+			s.Logger.Info(err)
+			continue
+		}
+
+		scope := ""
+		if cc.Scope != nil {
+			scope = *cc.Scope
+		}
+
+		if _, ok := results[scope]; !ok {
+			results[scope] = ScopeData{
+				Increment: 0,
+				Commits:   []string{},
+			}
+		}
+
+		result := results[scope]
+
+		result.Commits = append(result.Commits, commit)
+
+		if msg.IsBreakingChange() {
+			result.Increment = majorIncrement
+		}
+
+		if result.Increment < majorIncrement {
+			switch cc.Type {
+			case "feat", "refactor":
+				if result.Increment < minorIncrement {
+					result.Increment = minorIncrement
+				}
+			case "fix", "chore", "perf", "docs", "style":
+				if result.Increment < patchIncrement {
+					result.Increment = patchIncrement
+				}
+			case "build", "ci", "test":
+				if result.Increment < buildIncrement {
+					result.Increment = buildIncrement
+				}
+			default:
+				s.Logger.Infof("conventional commit type '%s' not implemented", cc.Type)
+			}
+		}
+
+		results[scope] = result
+	}
+
+	return results
+}
+
+func (s SemverHandler) parseConventionalCommit(commitMesage string) (
+	conventionalcommits.Message,
+	*conventionalcommits.ConventionalCommit,
+	error) {
+
+	machine := parser.NewMachine(conventionalcommits.WithTypes(conventionalcommits.TypesConventional), conventionalcommits.WithBestEffort())
+	msg, err := machine.Parse([]byte(commitMesage))
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if !msg.Ok() {
+		return nil, nil, errors.New("commit did not match conventional commit specification")
+	}
+
+	if cc, ok := msg.(*conventionalcommits.ConventionalCommit); ok {
+		return msg, cc, nil
+	}
+
+	return msg, nil, errors.New("failed to cast conventional commit message to conventional commit type")
 }
 
 func (s SemverHandler) refsToOrderedScopedVersions(refs []string) map[string][]Version {
@@ -80,6 +233,10 @@ func (s SemverHandler) refsToOrderedScopedVersions(refs []string) map[string][]V
 			if scope != "" {
 				s.Logger.Debugf("detected version %s for scope %s", ref, scope)
 			}
+		}
+
+		if s.VersionPrefix != nil {
+			strVer = strings.Replace(strVer, *s.VersionPrefix, "", 1)
 		}
 
 		sver, err := semver.ParseTolerant(strVer)
@@ -109,93 +266,36 @@ func (s SemverHandler) refsToOrderedScopedVersions(refs []string) map[string][]V
 	return allVers
 }
 
-func (s SemverHandler) parseConventionalCommit(commitMesage string) (
-	conventionalcommits.Message,
-	*conventionalcommits.ConventionalCommit,
-	error) {
+func (s SemverHandler) getBranchAndRemote(lookupBranch *string) (string, string, error) {
+	branch := ""
+	if lookupBranch != nil {
+		branch = *lookupBranch
+	} else {
+		currentBranch, err := s.Git.GetCurrentBranch()
+		if err != nil {
+			s.Logger.Warn("failed to get the current git branch")
+			return "", "", err
+		}
+		if currentBranch == nil {
+			s.Logger.Warn("failed to get the current git branch")
+			return "", "", errors.New("was not able to get the current branch on git")
+		}
 
-	machine := parser.NewMachine(conventionalcommits.WithTypes(conventionalcommits.TypesConventional), conventionalcommits.WithBestEffort())
-	msg, err := machine.Parse([]byte(commitMesage))
+		branch = *currentBranch
+	}
+
+	remote, err := s.Git.GetRemote()
 	if err != nil {
-		return nil, nil, err
+		return branch, "", err
+	}
+	if remote == nil {
+		return branch, "", errors.New("returned git remote was empty")
 	}
 
-	if !msg.Ok() {
-		return nil, nil, errors.New("commit did not match conventional commit specification")
-	}
-
-	if cc, ok := msg.(*conventionalcommits.ConventionalCommit); ok {
-		return msg, cc, nil
-	}
-
-	return msg, nil, errors.New("failed to cast conventional commit message to conventional commit type")
+	return branch, *remote, nil
 }
 
-func (s SemverHandler) determineIncrementFromCommits(commits []string) (map[string]int, map[string][]string) {
-	scopedIncrements := map[string]int{}
-	scopedCommits := map[string][]string{}
-	for _, commit := range commits {
-		message, err := s.Git.GetCommitMessageBody(commit)
-		if err != nil {
-			s.Logger.Error(err)
-			continue
-		}
-		if message == nil {
-			s.Logger.Errorf("did not find a commit message body for %s", commit)
-			continue
-		}
-
-		s.Logger.Debugf("try to determine increment from %s", commit)
-		s.Logger.Debug(*message)
-
-		msg, cc, err := s.parseConventionalCommit(*message)
-		if err != nil {
-			s.Logger.Info(err)
-			continue
-		}
-
-		scope := ""
-		if cc.Scope != nil {
-			scope = *cc.Scope
-		}
-
-		if _, ok := scopedIncrements[scope]; !ok {
-			scopedIncrements[scope] = 0
-		}
-
-		if _, ok := scopedIncrements[scope]; !ok {
-			scopedCommits[scope] = []string{}
-		}
-
-		scopedCommits[scope] = append(scopedCommits[scope], commit)
-
-		if msg.IsBreakingChange() {
-			scopedIncrements[scope] = majorIncrement
-			break
-		}
-
-		switch cc.Type {
-		case "feat", "refactor":
-			if scopedIncrements[scope] < minorIncrement {
-				scopedIncrements[scope] = minorIncrement
-			}
-		case "fix", "chore", "perf", "docs", "style":
-			if scopedIncrements[scope] < patchIncrement {
-				scopedIncrements[scope] = patchIncrement
-			}
-		case "build", "ci", "test":
-			if scopedIncrements[scope] < buildIncrement {
-				scopedIncrements[scope] = buildIncrement
-			}
-		default:
-			s.Logger.Infof("conventional commit type '%s' not implemented", cc.Type)
-		}
-	}
-
-	return scopedIncrements, scopedCommits
-}
-
-func (s SemverHandler) updateVersion(scope string, increment int, incomingVersion semver.Version, isPrerelease bool, prereleasePrefix, buildID *string) (*semver.Version, error) {
+func (s SemverHandler) UpdateVersion(scope string, increment int, incomingVersion semver.Version, isPrerelease bool, prereleasePrefix, buildID *string) (*semver.Version, error) {
 	switch increment {
 	case majorIncrement:
 		incomingVersion.Major++
@@ -266,41 +366,12 @@ func (s SemverHandler) updateVersion(scope string, increment int, incomingVersio
 	return &incomingVersion, nil
 }
 
-func (s SemverHandler) getBranchAndRemote(lookupBranch *string) (string, string, error) {
-	branch := ""
-	if lookupBranch != nil {
-		branch = *lookupBranch
-	} else {
-		currentBranch, err := s.Git.GetCurrentBranch()
-		if err != nil {
-			s.Logger.Warn("failed to get the current git branch")
-			return "", "", err
-		}
-		if currentBranch == nil {
-			s.Logger.Warn("failed to get the current git branch")
-			return "", "", errors.New("was not able to get the current branch on git")
-		}
-
-		branch = *currentBranch
-	}
-
-	remote, err := s.Git.GetRemote()
-	if err != nil {
-		return branch, "", err
-	}
-	if remote == nil {
-		return branch, "", errors.New("returned git remote was empty")
-	}
-
-	return branch, *remote, nil
-}
-
-type GetReleasedVersionsOptions struct {
+type GetExistingScopedReleases struct {
 	SkipFetch bool
 	UseTags   bool
 }
 
-func (s SemverHandler) GetReleasedVersions(opts GetReleasedVersionsOptions) (map[string][]Version, error) {
+func (s SemverHandler) GetExistingScopedReleases(opts GetExistingScopedReleases) (map[string][]Version, error) {
 	if !opts.SkipFetch {
 		if err := s.Git.Fetch(); err != nil {
 			s.Logger.Error("failed to run git fetch against target repository")
@@ -320,7 +391,7 @@ func (s SemverHandler) GetReleasedVersions(opts GetReleasedVersionsOptions) (map
 
 	var releasedRefs []string
 	for _, ref := range refs {
-		prefixRegex := regexp.MustCompile(fmt.Sprintf("^%s/", s.getBranchPrefix()))
+		prefixRegex := regexp.MustCompile(fmt.Sprintf("^%s", s.getBranchPrefix()))
 		if prefixRegex.MatchString(ref) {
 			refSplit := prefixRegex.Split(ref, 2)
 			s.Logger.Debugf("ref %s matched filter and trim, capturing %s", ref, refSplit[1])
@@ -328,27 +399,20 @@ func (s SemverHandler) GetReleasedVersions(opts GetReleasedVersionsOptions) (map
 		}
 	}
 
-	scopedRefs := s.refsToOrderedScopedVersions(releasedRefs)
-
-	return scopedRefs, nil
+	return s.refsToOrderedScopedVersions(releasedRefs), nil
 }
 
-type VersionOptions struct {
-	UseTags          bool
-	Branch           *string
-	BuildID          *string
-	IsPrerelease     bool
-	PrereleasePrefix *string
-	ReleasePrefix    *string
-	VersionPrefix    *string
+type LoadNewAndUpdatedReleasesOptions struct {
+	Branch  *string
+	UseTags bool
 }
 
-func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Version, error) {
-	refType := "heads"
-	if opts.UseTags {
-		refType = "tags"
-	}
+type ScopeVersion struct {
+	ScopeData
+	Version *Version
+}
 
+func (s SemverHandler) LoadNewAndUpdatedReleases(scopedReleases map[string][]Version, opts LoadNewAndUpdatedReleasesOptions) (map[string]ScopeVersion, error) {
 	branch, remote, err := s.getBranchAndRemote(opts.Branch)
 	if err != nil {
 		return nil, err
@@ -363,131 +427,157 @@ func (s SemverHandler) GetInitialVersions(opts VersionOptions) (map[string]Versi
 		return nil, fmt.Errorf("latest commit for branch %s on %s returned blank", branch, remote)
 	}
 
-	commits, err := s.Git.ListCommits(*latestCommit)
+	oldestDT, oldestVersion, oldestScope, err := s.getOldest(scopedReleases, branch, remote, *latestCommit, opts.UseTags)
 	if err != nil {
-		s.Logger.Error("failed to get list commits for branch %s on %s", branch, remote)
+		s.Logger.Errorf("failed to get the oldest commits against the %s on %s", branch, remote)
 		return nil, err
 	}
-	if len(commits) == 0 {
-		return nil, fmt.Errorf("no commits were found on branch %s on %s", branch, remote)
+	if oldestDT == nil || oldestVersion == nil {
+		return nil, fmt.Errorf("did not find the oldest commit aganst %s on %s", branch, remote)
 	}
 
-	result := map[string]Version{}
-	increments, scopedCommits := s.determineIncrementFromCommits(commits)
-	for scope, increment := range increments {
-		incomingVersion, err := s.updateVersion(scope, increment, semver.MustParse("0.0.0"), opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
-		if err != nil {
-			s.Logger.Errorf("failed to update the version for scope %s", scope)
-			s.Logger.Error(err)
+	oldestCommit, err := s.Git.GetLastCommitOnRef(*oldestVersion)
+	if err != nil {
+		s.Logger.Warnf("was unable to get the latest commit against %s", oldestVersion)
+		return nil, err
+	}
+	if oldestCommit == nil {
+		return nil, fmt.Errorf("latest commit against %s came back blank", *oldestVersion)
+	}
+
+	commits, err := s.Git.ListCommits(*oldestCommit + ".." + *latestCommit)
+	if err != nil {
+		s.Logger.Warn("was unable to resolve a list of commits")
+		return nil, err
+	}
+
+	scopeData := s.determineIncrementFromCommits(commits)
+
+	results := map[string]ScopeVersion{}
+	for scope, data := range scopeData {
+		if oldestScope != nil && scope == *oldestScope {
+			version := scopedReleases[scope][0]
+			scopeVersion := ScopeVersion{
+				Version: &version,
+			}
+			scopeVersion.Increment = data.Increment
+			scopeVersion.Commits = data.Commits
+			results[scope] = scopeVersion
+		}
+		if _, ok := scopedReleases[scope]; !ok {
+			scopeVersion := ScopeVersion{}
+			scopeVersion.Increment = data.Increment
+			scopeVersion.Commits = data.Commits
+			results[scope] = scopeVersion
+		}
+	}
+
+	for scope, versions := range scopedReleases {
+		if _, ok := results[scope]; ok {
 			continue
 		}
-		if incomingVersion == nil {
-			s.Logger.Errorf("failed to get updated the version for scope %s", scope)
+		if len(versions) <= 0 {
 			continue
 		}
 
+		version := versions[0]
 		sb := strings.Builder{}
-		if opts.ReleasePrefix != nil {
-			sb.WriteString(fmt.Sprintf("%s/", *opts.ReleasePrefix))
-		}
-		sb.WriteString(scope)
-		if scope != "" {
+		if !opts.UseTags {
+			sb.WriteString(remote)
 			sb.WriteString("/")
 		}
-
-		if opts.VersionPrefix != nil {
-			sb.WriteString(*opts.VersionPrefix)
-		}
-
-		releaseRef := sb.String()
-
-		result[scope] = Version{
-			VersionString: releaseRef + incomingVersion.String(),
-			Version:       *incomingVersion,
-			ReleaseCommit: scopedCommits[scope][0],
-			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
-		}
-	}
-
-	return result, nil
-}
-
-func (s SemverHandler) EvaluateScopedVersions(scopedReleases map[string][]Version, opts VersionOptions) (map[string]Version, error) {
-	result := map[string]Version{}
-	for scope, refs := range scopedReleases {
-		prefix := ""
+		sb.WriteString(s.getBranchPrefix())
 		if scope != "" {
-			prefix = scope + "/"
+			sb.WriteString(scope)
+			sb.WriteString("/")
+		}
+		if s.VersionPrefix != nil {
+			sb.WriteString(*s.VersionPrefix)
 		}
 
-		refType := "heads"
-		if opts.UseTags {
-			refType = "tags"
-		}
+		sb.WriteString(version.VersionString)
+		lookupVersion := sb.String()
 
-		s.Logger.Debugf("determining versions for scope %s at path %s", scope, prefix)
-
-		lastReleasedCommit, err := s.getLastCommitOnRef(prefix+refs[0].VersionString, opts.UseTags)
-
-		s.Logger.Debugf("last commit determined for scope %s was %s", scope, lastReleasedCommit)
-
-		if err != nil || lastReleasedCommit == nil {
-			s.Logger.Errorf("failed to get latest commit for scope %s", scope)
-			continue
-		}
-
-		trimmedLastReleasedCommit := strings.TrimSpace(*lastReleasedCommit)
-
-		branch, remote, err := s.getBranchAndRemote(opts.Branch)
+		releaseCommit, err := s.Git.GetLastCommitOnRef(lookupVersion)
 		if err != nil {
-			return nil, err
-		}
-
-		commits, err := s.Git.ListCommits(trimmedLastReleasedCommit + ".." + remote + "/" + branch)
-		if err != nil {
-			s.Logger.Errorf("failed to list commits after %s for scope %s", trimmedLastReleasedCommit, commits)
-			continue
-		}
-
-		increments, _ := s.determineIncrementFromCommits(commits)
-		if _, ok := increments[scope]; !ok {
-			return nil, fmt.Errorf("failed to find an increment for the given scope %s", scope)
-		}
-
-		incomingVersion, err := s.updateVersion(scope, increments[scope], refs[0].Version, opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
-		if err != nil {
-			s.Logger.Errorf("failed to update the version for scope %s", scope)
+			s.Logger.Warnf("failed to get latest commit for reference %s on %s", lookupVersion, remote)
 			s.Logger.Error(err)
 			continue
 		}
-		if incomingVersion == nil {
-			s.Logger.Errorf("failed to get updated the version for scope %s", scope)
+		if releaseCommit == nil {
+			s.Logger.Warnf("no commits were found for reference %s on %s", lookupVersion, remote)
 			continue
 		}
 
+		if *releaseCommit == *latestCommit {
+			continue
+		}
+
+		releaseScopeData := s.determineIncrementFromCommits(commits)
+		if _, ok := releaseScopeData[scope]; !ok {
+			continue
+		}
+
+		scopedVersion := ScopeVersion{
+			Version: &version,
+		}
+		scopedVersion.Increment = releaseScopeData[scope].Increment
+		scopedVersion.Commits = releaseScopeData[scope].Commits
+		results[scope] = scopedVersion
+	}
+
+	return results, nil
+}
+
+type CreateUpdateReleasesOptions struct {
+	UseTags          bool
+	IsPrerelease     bool
+	PrereleasePrefix *string
+	BuildID          *string
+}
+
+func (s SemverHandler) CreateUpdateReleases(scopedReleasesData map[string]ScopeVersion, opts CreateUpdateReleasesOptions) error {
+	for scope, data := range scopedReleasesData {
+		version := semver.MustParse("0.0.0")
+
 		sb := strings.Builder{}
-		if opts.ReleasePrefix != nil {
-			sb.WriteString(fmt.Sprintf("%s/", *opts.ReleasePrefix))
+		sb.WriteString("refs/")
+		if opts.UseTags {
+			sb.WriteString("tags/")
+		} else {
+			sb.WriteString("heads/")
 		}
-		sb.WriteString(scope)
-		if opts.VersionPrefix != nil {
-			sb.WriteString(*opts.VersionPrefix)
+		sb.WriteString(s.getBranchPrefix())
+		if scope != "" {
+			sb.WriteString(scope)
+			sb.WriteString("/")
+		}
+		if data.Version != nil {
+			version = data.Version.Version
+		}
+		if s.VersionPrefix != nil {
+			sb.WriteString(*s.VersionPrefix)
 		}
 
-		releaseRef := sb.String()
-
-		mostRecentCommit := trimmedLastReleasedCommit
-		if len(commits) > 0 {
-			mostRecentCommit = commits[0]
+		incomingVersion, err := s.UpdateVersion(scope, data.Increment, version, opts.IsPrerelease, opts.PrereleasePrefix, opts.BuildID)
+		if err != nil {
+			s.Logger.Errorf("failed to get a new or updated version for scope %s", scope)
+			return err
+		}
+		if incomingVersion == nil {
+			return fmt.Errorf("attempt to generate a new or updaated version for %s came back empty", scope)
 		}
 
-		result[scope] = Version{
-			VersionString: releaseRef + incomingVersion.String(),
-			Version:       *incomingVersion,
-			ReleaseCommit: mostRecentCommit,
-			ReleaseString: fmt.Sprintf("refs/%s/%s", refType, releaseRef),
+		releasePrefix := sb.String()
+		fullVersion := incomingVersion.String()
+		releaseVersions := []string{fullVersion, fullVersion[0:3] + fullVersion[5:], fullVersion[0:1] + fullVersion[5:]}
+
+		for _, releaseVersion := range releaseVersions {
+			if err := s.Git.ForcePushSourceToTargetRef(data.Commits[0], releasePrefix+releaseVersion); err != nil {
+				return err
+			}
 		}
 	}
 
-	return result, nil
+	return nil
 }
