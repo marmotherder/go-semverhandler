@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/blang/semver v3.5.1+incompatible
 	github.com/leodido/go-conventionalcommits v0.9.0
-	github.com/marmotherder/go-gitcliwrapper v0.0.0-20220831091606-cb561b6f578f
+	github.com/marmotherder/go-gitcliwrapper v0.0.0-20220901082338-aaec7e386b73
 )
 
 require (
