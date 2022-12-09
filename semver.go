@@ -534,6 +534,9 @@ type CreateUpdateReleasesOptions struct {
 	IsPrerelease     bool
 	PrereleasePrefix *string
 	BuildID          *string
+	SkipMajor        bool
+	SkipMinor        bool
+	SkipPatch        bool
 }
 
 func (s SemverHandler) CreateUpdateReleases(scopedReleasesData map[string]ScopeVersion, opts CreateUpdateReleasesOptions) error {
@@ -570,7 +573,16 @@ func (s SemverHandler) CreateUpdateReleases(scopedReleasesData map[string]ScopeV
 
 		releasePrefix := sb.String()
 		fullVersion := incomingVersion.String()
-		releaseVersions := []string{fullVersion, fullVersion[0:3] + fullVersion[5:], fullVersion[0:1] + fullVersion[5:]}
+		
+		if !opts.SkipPatch {
+			releaseVersions = append(releaseVersions, fullVersion)
+		}
+		if !opts.SkipMinor {
+			releaseVersions = append(releaseVersions, fullVersion[0:3]+fullVersion[5:])
+		}
+		if !opts.SkipPatch {
+			releaseVersions = append(releaseVersions, fullVersion[0:1]+fullVersion[5:])
+		}
 
 		for _, releaseVersion := range releaseVersions {
 			if err := s.Git.ForcePushSourceToTargetRef(data.Commits[0], releasePrefix+releaseVersion); err != nil {
